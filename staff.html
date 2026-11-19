@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Staff | Check Code</title>
+<style>
+  :root { --brown:#5a2a12; --caramel:#c0643a; --cream:#fff6ec; --peach:#f6c9a8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--cream); color:var(--brown); }
+  main { max-width: 420px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 4px 0 16px; }
+  label { display:block; font-weight:600; margin: 12px 0 4px; font-size:14px; }
+  input { width:100%; padding:14px; border:2px solid var(--peach); border-radius:10px; font-size:20px; background:#fff; color:var(--brown); text-transform:uppercase; letter-spacing:2px; }
+  #pin { text-transform:none; letter-spacing:4px; }
+  .row { display:flex; gap:10px; margin-top:14px; }
+  button { flex:1; padding:14px; font-size:17px; font-weight:700; border:0; border-radius:12px; color:#fff; cursor:pointer; }
+  #check { background:var(--brown); }
+  #redeem { background:var(--caramel); }
+  button:disabled { opacity:.5; }
+  .out { margin-top:20px; padding:18px; border-radius:14px; font-size:20px; font-weight:700; text-align:center; display:none; }
+  .ok { background:#d9f5df; color:#0b5d1e; }
+  .bad { background:#fde0e0; color:#8a1414; }
+  .big { font-size:40px; display:block; }
+  small { display:block; font-weight:500; font-size:14px; margin-top:6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Check discount code</h1>
+
+  <label for="pin">Staff PIN</label>
+  <input id="pin" type="password" inputmode="numeric" autocomplete="off">
+
+  <label for="code">Customer code</label>
+  <input id="code" type="text" placeholder="BC-XXXXXX" autocomplete="off" autocapitalize="characters">
+
+  <label for="amount">Order total before discount (optional, AED)</label>
+  <input id="amount" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 250" style="letter-spacing:0">
+
+  <div class="row">
+    <button id="check">Check only</button>
+    <button id="redeem">Apply &amp; use</button>
+  </div>
+
+  <div class="out" id="out"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+try { $('pin').value = sessionStorage.getItem('pin') || ''; } catch {}
+
+function show(cls, html) {
+  const o = $('out'); o.className = 'out ' + cls; o.innerHTML = html; o.style.display = 'block';
+}
+function when(iso) { return iso ? new Date(iso).toLocaleString() : ''; }
+
+async function call(path, withPin) {
+  const code = $('code').value.trim();
+  if (!code) return show('bad', 'Enter a code');
+  const headers = { 'Content-Type': 'application/json' };
+  if (withPin) {
+    const pin = $('pin').value;
+    if (!pin) return show('bad', 'Enter the staff PIN');
+    headers['x-staff-pin'] = pin;
+    try { sessionStorage.setItem('pin', pin); } catch {}
+  }
+  $('check').disabled = $('redeem').disabled = true;
+  try {
+    const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ code, amount: $('amount').value }) });
+    const d = await r.json();
+    if (r.status === 401) return show('bad', 'Wrong staff PIN');
+    if (!r.ok) return show('bad', d.error || 'Error');
+    const good = d.valid ?? d.ok;
+    if (good) {
+      const used = path.includes('redeem');
+      show('ok', `✔ ${used ? 'APPLIED' : 'VALID'}<span class="big">${d.percent}% OFF</span>` +
+        (used ? '<small>Code is now used up.</small>' : `<small>Valid until ${when(d.expiresAt)}</small>`));
+    } else {
+      const extra = d.reason === 'used' ? `<small>Used ${when(d.usedAt)} (${d.usedChannel || ''})</small>` : '';
+      show('bad', `✖ ${d.message}${extra}`);
+    }
+  } catch { show('bad', 'No connection'); }
+  finally { $('check').disabled = $('redeem').disabled = false; }
+}
+
+$('check').onclick = () => call('/api/validate', false);
+$('redeem').onclick = () => call('/api/redeem', true);
+</script>
+</body>
+</html>

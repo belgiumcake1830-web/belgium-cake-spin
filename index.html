@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spin &amp; Save | Belgium Cake</title>
+<style>
+  :root { --brown:#5a2a12; --caramel:#c0643a; --cream:#fff6ec; --peach:#f6c9a8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--cream); color:var(--brown); }
+  main { max-width: 420px; margin: 0 auto; padding: 24px 16px 48px; text-align: center; }
+  h1 { font-size: 26px; margin: 8px 0 4px; }
+  p.sub { margin: 0 0 20px; opacity: .8; }
+  label { display:block; text-align:left; font-weight:600; margin: 12px 0 4px; font-size:14px; }
+  input { width:100%; padding:12px; border:2px solid var(--peach); border-radius:10px; font-size:16px; background:#fff; color:var(--brown); }
+  button { width:100%; margin-top:18px; padding:14px; font-size:18px; font-weight:700; border:0; border-radius:12px; background:var(--caramel); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .wheel-wrap { position:relative; width:300px; max-width:90vw; margin:20px auto 0; }
+  canvas { width:100%; height:auto; display:block; }
+  .pointer { position:absolute; top:-8px; left:50%; transform:translateX(-50%); width:0; height:0;
+    border-left:12px solid transparent; border-right:12px solid transparent; border-top:24px solid var(--brown); }
+  .err { color:#b00020; margin-top:12px; min-height:20px; font-size:14px; }
+  .result { display:none; margin-top:20px; background:#fff; border:2px dashed var(--caramel); border-radius:14px; padding:18px; }
+  .result .pct { font-size:44px; font-weight:800; color:var(--caramel); }
+  .result .code { font-size:30px; letter-spacing:3px; font-weight:800; margin:6px 0; user-select:all; }
+  .result small { display:block; opacity:.8; margin-top:6px; }
+  .copy { background:var(--brown); font-size:15px; padding:10px; margin-top:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Spin &amp; Save 🎂</h1>
+  <p class="sub">Order early, win a bigger discount.</p>
+
+  <label for="phone">Your phone number</label>
+  <input id="phone" type="tel" inputmode="tel" placeholder="05X XXX XXXX" autocomplete="tel">
+
+  <label for="date">Date you need your order</label>
+  <input id="date" type="date">
+
+  <div class="wheel-wrap">
+    <div class="pointer"></div>
+    <canvas id="wheel" width="600" height="600"></canvas>
+  </div>
+
+  <button id="spin">SPIN</button>
+  <div class="err" id="err"></div>
+
+  <div class="result" id="result">
+    <div>You won</div>
+    <div class="pct" id="pct"></div>
+    <div>Your code</div>
+    <div class="code" id="code"></div>
+    <button class="copy" id="copy">Copy code</button>
+    <small id="exp"></small>
+    <small>Show this code at the counter or enter it when ordering online. One use only.</small>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $('wheel');
+let values = [1, 5, 10, 20, 3, 8, 15, 12];
+let rotation = 0;
+
+// Earliest selectable date = today
+$('date').min = new Date().toISOString().slice(0, 10);
+
+function draw(rot) {
+  const n = values.length, seg = (2 * Math.PI) / n, c = canvas.getContext('2d'), R = canvas.width / 2;
+  c.clearRect(0, 0, canvas.width, canvas.height);
+  c.save(); c.translate(R, R); c.rotate(rot);
+  values.forEach((v, i) => {
+    c.beginPath(); c.moveTo(0, 0);
+    c.arc(0, 0, R - 6, -Math.PI / 2 + i * seg, -Math.PI / 2 + (i + 1) * seg);
+    c.closePath();
+    c.fillStyle = i % 2 ? '#f6c9a8' : '#c0643a'; c.fill();
+    c.save();
+    c.rotate(-Math.PI / 2 + (i + 0.5) * seg);
+    c.fillStyle = i % 2 ? '#5a2a12' : '#ffffff';
+    c.font = 'bold 44px system-ui, sans-serif';
+    c.textAlign = 'right';
+    c.fillText(v + '%', R - 46, 15);
+    c.restore();
+  });
+  c.restore();
+}
+draw(0);
+
+// Build wheel values around the server's result (max 8 segments, includes the winner).
+function buildValues(min, max, winner) {
+  const pool = [];
+  for (let v = min; v <= max; v++) if (v !== winner) pool.push(v);
+  pool.sort(() => Math.random() - 0.5);
+  const list = [winner, ...pool.slice(0, 7)];
+  list.sort(() => Math.random() - 0.5);
+  return list;
+}
+
+function animateTo(index) {
+  return new Promise((resolve) => {
+    const n = values.length, seg = (2 * Math.PI) / n;
+    const center = (index + 0.5) * seg;
+    const target = 2 * Math.PI * 5 - center; // 5 full turns, winner lands under the pointer
+    const start = rotation, dur = 4500, t0 = performance.now();
+    (function frame(t) {
+      const p = Math.min(1, (t - t0) / dur);
+      const ease = 1 - Math.pow(1 - p, 3);
+      rotation = start + (target - start) * ease;
+      draw(rotation);
+      if (p < 1) requestAnimationFrame(frame); else resolve();
+    })(t0);
+  });
+}
+
+function showResult(data) {
+  $('pct').textContent = data.percent + '% OFF';
+  $('code').textContent = data.code;
+  $('exp').textContent = 'Valid until ' + new Date(data.expiresAt).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+  $('result').style.display = 'block';
+  $('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+$('spin').addEventListener('click', async () => {
+  $('err').textContent = '';
+  $('result').style.display = 'none';
+  $('spin').disabled = true;
+  try {
+    const r = await fetch('/api/spin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: $('phone').value, eventDate: $('date').value }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Something went wrong.');
+
+    values = buildValues(data.range.min, data.range.max, data.percent);
+    rotation = 0; draw(0);
+    await animateTo(values.indexOf(data.percent));
+
+    if (data.already) {
+      $('err').textContent = data.used
+        ? 'You already spun today and used your code.'
+        : 'You already spun today. Here is your code:';
+    }
+    showResult(data);
+  } catch (e) {
+    $('err').textContent = e.message;
+  } finally {
+    $('spin').disabled = false;
+  }
+});
+
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('code').textContent); $('copy').textContent = 'Copied ✓'; }
+  catch { $('copy').textContent = 'Press and hold the code to copy'; }
+  setTimeout(() => ($('copy').textContent = 'Copy code'), 2000);
+});
+</script>
+</body>
+</html>
