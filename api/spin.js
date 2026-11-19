@@ -1,75 +1,72 @@
-import { timingSafeEqual } from 'node:crypto';
-import { sb, normalizeCode, send } from '../lib/db.js';
+import { sb, dubaiToday, send } from '../lib/db.js';
+import { tierFor, pickPercent, makeCode, CODE_VALID_DAYS, MAX_DAYS_AHEAD } from '../lib/rules.js';
 
-function same(a, b) {
-  const x = Buffer.from(String(a || ''));
-  const y = Buffer.from(String(b || ''));
-  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
-}
-
-// POST /api/redeem   body: { code }
-// Marks the code as USED. One call only works once, even if two people
-// try at the same moment (the database update is atomic).
-//
-// Who may call it:
-//   counter  -> header  x-staff-pin: <STAFF_PIN>
-//   online   -> header  x-checkout-secret: <CHECKOUT_SECRET>   (server-to-server only!)
+// POST /api/spin   body: { phone, eventDate: "YYYY-MM-DD" }
+// The SERVER picks the discount. The browser only shows the animation.
 export default async function handler(req, res) {
   if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
 
-  let channel = null;
-  if (same(req.headers['x-staff-pin'], process.env.STAFF_PIN)) channel = 'counter';
-  else if (same(req.headers['x-checkout-secret'], process.env.CHECKOUT_SECRET)) channel = 'online';
-  if (!channel) return send(res, 401, { error: 'Not allowed.' });
-
   try {
-    const code = normalizeCode(req.body?.code);
-    if (!/^BC-[A-Z0-9]{6}$/.test(code)) {
-      return send(res, 200, { ok: false, reason: 'invalid', message: 'Code not found.' });
+    const phone = String(req.body?.phone || '').replace(/\D/g, '');
+    const eventDate = String(req.body?.eventDate || '');
+
+    if (phone.length < 8 || phone.length > 15) {
+      return send(res, 400, { error: 'Please enter a valid phone number.' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
+      return send(res, 400, { error: 'Please choose the date you need the order.' });
     }
 
-    // Optional order total (before discount). Used only for the owner dashboard.
-    const rawAmount = Number(req.body?.amount);
-    const amount = Number.isFinite(rawAmount) && rawAmount > 0 && rawAmount < 1e6 ? rawAmount : null;
+    const today = dubaiToday();
+    const daysAhead = Math.round((Date.parse(eventDate) - Date.parse(today)) / 86400000);
+    if (Number.isNaN(daysAhead) || daysAhead < 0 || daysAhead > MAX_DAYS_AHEAD) {
+      return send(res, 400, { error: `Choose a date from today up to ${MAX_DAYS_AHEAD} days ahead.` });
+    }
 
-    const nowIso = new Date().toISOString();
-    // Atomic: only updates the row if it is still unused AND not expired.
-    const updated = await sb(
-      `discount_codes?code=eq.${code}&used=eq.false&expires_at=gt.${encodeURIComponent(nowIso)}` +
-        `&select=code,percent`,
-      {
-        method: 'PATCH',
-        body: {
-          used: true,
-          used_at: nowIso,
-          used_channel: channel,
-          ...(amount !== null ? { order_amount: amount } : {}),
-        },
-        prefer: 'return=representation',
-      }
+    const tier = tierFor(daysAhead);
+
+    // One spin per phone number per day: return the earlier result instead.
+    const dayStart = new Date(`${today}T00:00:00+04:00`).toISOString();
+    const existing = await sb(
+      `discount_codes?select=code,percent,expires_at,used,days_ahead` +
+        `&phone=eq.${phone}&created_at=gte.${encodeURIComponent(dayStart)}&limit=1`
     );
-
-    if (updated.length) {
+    if (existing.length) {
+      const e = existing[0];
       return send(res, 200, {
-        ok: true,
-        percent: updated[0].percent,
-        message: `Applied ${updated[0].percent}% off`,
+        already: true,
+        code: e.code,
+        percent: e.percent,
+        expiresAt: e.expires_at,
+        used: e.used,
+        range: { min: tier.min, max: tier.max },
       });
     }
 
-    // Nothing updated: find out why.
-    const rows = await sb(`discount_codes?select=used,used_at,used_channel,expires_at&code=eq.${code}&limit=1`);
-    if (!rows.length) return send(res, 200, { ok: false, reason: 'invalid', message: 'Code not found.' });
-    if (rows[0].used) {
-      return send(res, 200, {
-        ok: false,
-        reason: 'used',
-        message: 'This code was already used.',
-        usedAt: rows[0].used_at,
-        usedChannel: rows[0].used_channel,
-      });
+    const percent = pickPercent(tier);
+    const expiresAt = new Date(Date.now() + CODE_VALID_DAYS * 86400000).toISOString();
+
+    // Insert with a unique code; retry if (very unlikely) the code already exists.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = makeCode();
+      try {
+        await sb('discount_codes', {
+          method: 'POST',
+          body: { code, phone, percent, days_ahead: daysAhead, expires_at: expiresAt },
+          prefer: 'return=minimal',
+        });
+        return send(res, 200, {
+          already: false,
+          code,
+          percent,
+          expiresAt,
+          range: { min: tier.min, max: tier.max },
+        });
+      } catch (err) {
+        if (err.status !== 409) throw err; // 409 = duplicate code, try again
+      }
     }
-    return send(res, 200, { ok: false, reason: 'expired', message: 'This code has expired.' });
+    return send(res, 500, { error: 'Could not create a code, please try again.' });
   } catch (err) {
     console.error(err);
     return send(res, 500, { error: 'Server error, please try again.' });
